@@ -5,6 +5,7 @@ add_compile_options(-std=c++14 -Wall -Wextra -Wpedantic)
 
 find_package(catkin REQUIRED COMPONENTS
   message_generation
+  roslib
   roscpp
   sensor_msgs
   std_msgs
@@ -27,7 +28,7 @@ generate_messages(
 
 catkin_package(
   INCLUDE_DIRS include
-  CATKIN_DEPENDS message_runtime roscpp sensor_msgs std_msgs
+  CATKIN_DEPENDS message_runtime roslib roscpp sensor_msgs std_msgs
 )
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
@@ -51,6 +52,7 @@ include_directories(
 
 add_library(${PROJECT_NAME}_core
   src/ars620_decoder.cpp
+  src/canfd_frame_logger.cpp
   src/cycle_assembler.cpp
   src/pointcloud.cpp
   src/usbcanfd_receiver.cpp
@@ -63,8 +65,11 @@ add_dependencies(ars620_driver_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin
 target_link_libraries(ars620_driver_node ${PROJECT_NAME}_core ${catkin_LIBRARIES})
 
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_nosetests(test/test_raw_canfd_csv_to_mf4.py)
+
   catkin_add_gtest(test_ars620_driver
     test/test_ars620_decoder.cpp
+    test/test_canfd_frame_logger.cpp
     test/test_vendor_receiver.cpp
   )
   if(TARGET test_ars620_driver)
@@ -92,6 +97,10 @@ install(DIRECTORY include/${PROJECT_NAME}/
 
 install(DIRECTORY launch/
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
+)
+
+install(PROGRAMS scripts/raw_canfd_csv_to_mf4.py
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/scripts
 )
 
 install(DIRECTORY lib/

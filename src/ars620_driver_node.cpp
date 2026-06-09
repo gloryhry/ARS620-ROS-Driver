@@ -1,4 +1,5 @@
 #include <ars620_driver/ars620_decoder.h>
+#include <ars620_driver/canfd_frame_logger.h>
 #include <ars620_driver/cycle_assembler.h>
 #include <ars620_driver/pointcloud.h>
 #include <ars620_driver/usbcanfd_receiver.h>
@@ -261,12 +262,16 @@ int main(int argc, char** argv) {
   std::string stamp_policy = "vendor_timestamp";
   bool publish_partial = false;
   bool debug_raw_frames = false;
+  bool save_all_canfd_frames = false;
+  std::string save_all_canfd_path = "~/.ros/ars620_canfd_logs";
   double partial_timeout = 0.1;
   int receive_wait_ms = 20;
   pnh.param("frame_id", frame_id, frame_id);
   pnh.param("stamp_policy", stamp_policy, stamp_policy);
   pnh.param("publish_partial", publish_partial, publish_partial);
   pnh.param("debug_raw_frames", debug_raw_frames, debug_raw_frames);
+  pnh.param("save_all_canfd_frames", save_all_canfd_frames, save_all_canfd_frames);
+  pnh.param("save_all_canfd_path", save_all_canfd_path, save_all_canfd_path);
   pnh.param("partial_timeout", partial_timeout, partial_timeout);
   pnh.param("receive_wait_ms", receive_wait_ms, receive_wait_ms);
 
@@ -289,16 +294,36 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  ars620_driver::CanFdFrameLogger canfd_logger;
+  if (save_all_canfd_frames) {
+    if (!canfd_logger.open(save_all_canfd_path, &error)) {
+      ROS_ERROR_STREAM("Failed to enable CAN-FD full-frame logging: " << error);
+    } else {
+      ROS_INFO_STREAM("Saving all CAN-FD frames to " << canfd_logger.ascPath() << " and "
+                                            << canfd_logger.rawCsvPath());
+    }
+  }
+
   ars620_driver::RdiAssembler rdi_assembler(publish_partial, ros::Duration(partial_timeout));
   ars620_driver::OdAssembler od_assembler(publish_partial, ros::Duration(partial_timeout));
   std::vector<ars620_driver::CanFrame> frames;
+  std::vector<ars620_driver::RawCanFdFrame> raw_frames;
   ros::Rate idle_rate(200.0);
   while (ros::ok()) {
-    if (!receiver.receive(receive_wait_ms, &frames, &error)) {
+    if (!receiver.receive(receive_wait_ms, &frames, save_all_canfd_frames ? &raw_frames : nullptr,
+                          &error)) {
       ROS_ERROR_STREAM_THROTTLE(1.0, "USBCAN-FD receive failed: " << error);
       ros::spinOnce();
       idle_rate.sleep();
       continue;
+    }
+    if (canfd_logger.isOpen()) {
+      for (const auto& raw_frame : raw_frames) {
+        if (!canfd_logger.write(raw_frame, &error)) {
+          ROS_ERROR_STREAM("CAN-FD full-frame logging disabled: " << error);
+          break;
+        }
+      }
     }
     if (debug_raw_frames && !frames.empty()) {
       std::map<uint32_t, size_t> id_counts;
@@ -370,5 +395,6 @@ int main(int argc, char** argv) {
     ros::spinOnce();
     idle_rate.sleep();
   }
+  canfd_logger.close(true);
   return 0;
 }

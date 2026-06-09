@@ -15,7 +15,7 @@
 - `0x100..0x140` RDI header 和 cluster 数据帧
 - `0x200..0x219` OD header 和 object 数据帧
 
-DBC 中标注总线类型为 `CAN FD`，ARS620 输出帧格式为 `StandardCAN_FD`。驱动会丢弃扩展帧、RTR 帧和错误帧；标准数据帧如果 ID 不支持或长度不符合预期，也会被忽略。
+DBC 中标注总线类型为 `CAN FD`，ARS620 输出帧格式为 `StandardCAN_FD`。解码路径会忽略扩展帧、RTR 帧和错误帧；标准数据帧如果 ID 不支持或长度不符合预期，也会被忽略。打开全量保存功能时，这些被解码路径过滤掉的原始帧也会在过滤前保存。
 
 ## 硬件连接和 CAN-FD 参数
 
@@ -92,6 +92,30 @@ roslaunch ars620_driver ars620_driver.launch debug_raw_frames:=true
 received 12 raw CAN-FD frames: 0x100=1 0x101=1 ...
 ```
 
+如果需要保存厂商 SDK 返回的每一帧 CAN-FD 原始报文，打开全量保存：
+
+```bash
+roslaunch ars620_driver ars620_driver.launch \
+  save_all_canfd_frames:=true \
+  save_all_canfd_path:=/tmp/ars620_canfd_test
+```
+
+`save_all_canfd_path` 表示目录。节点会在目录下创建带启动时间戳的文件：
+
+```text
+ars620_canfd_YYYYmmdd_HHMMSS.asc
+ars620_canfd_YYYYmmdd_HHMMSS.raw.csv
+ars620_canfd_YYYYmmdd_HHMMSS.mf4
+```
+
+节点运行期间实时写入 ASC 和 raw CSV；正常 Ctrl-C/退出时，通过 `scripts/raw_canfd_csv_to_mf4.py` 将 raw CSV 转成 MF4。MF4 转换依赖可按以下方式安装：
+
+```bash
+python3 -m pip install asammdf
+```
+
+如果当前环境没有 `asammdf`，节点会在退出时打印明确错误，并保留 `.asc` 和 `.raw.csv`。生成的 MF4 是原始 CAN-FD 帧 MDF4 容器，包含 `timestamp`、`can_id`、标志位、长度和 `data_00..data_63` 等字段；它不是 DBC 解码后的信号通道文件。
+
 如果打开 `debug_raw_frames` 后没有任何原始帧计数，应优先检查雷达供电、Public CAN 接线、USBCAN-FD 通道、终端电阻和 CAN-FD 波特率，不要先怀疑解码器。
 
 ## Launch 参数
@@ -110,6 +134,8 @@ received 12 raw CAN-FD frames: 0x100=1 0x101=1 ...
 - `partial_timeout`: 不完整周期超时时间，单位秒，默认 `0.1`
 - `receive_wait_ms`: SDK 接收等待时间，单位毫秒，默认 `20`
 - `debug_raw_frames`: 是否打印原始 CAN-FD ID 计数，默认 `false`
+- `save_all_canfd_frames`: 是否保存收到的全部 CAN-FD 帧，并在正常退出时转换 MF4，默认 `false`
+- `save_all_canfd_path`: 全量帧保存目录，默认 `~/.ros/ars620_canfd_logs`
 
 ## ROS 话题
 
@@ -160,6 +186,16 @@ rostopic hz /ars620/od_points
 rostopic echo /ars620/config_state
 rostopic echo /ars620/system_status
 ```
+
+全量报文保存冒烟测试：
+
+```bash
+roslaunch ars620_driver ars620_driver.launch \
+  save_all_canfd_frames:=true \
+  save_all_canfd_path:=/tmp/ars620_canfd_test
+```
+
+节点运行时确认目录下出现 `.asc` 和 `.raw.csv`。Ctrl-C 正常退出后，确认生成 `.mf4`，或日志中明确提示缺少 `asammdf`。如果进程被 `SIGKILL` 杀死或异常断电，已 flush 的 ASC/raw CSV 通常会保留，但不保证生成 MF4。
 
 如果原始帧日志中能看到 `0x100..0x140`，说明 RDI/cluster 输出已经进入驱动。如果只看到 `0x200..0x219`，说明当前雷达更像是 OD/object 输出模式。若完全没有原始帧，应先检查硬件链路和 CAN-FD 参数。
 

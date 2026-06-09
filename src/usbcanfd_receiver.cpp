@@ -58,6 +58,7 @@ struct UsbCanFdReceiver::Impl {
   SetBaudFn set_dbit_baud = nullptr;
   SetBaudFn set_canfd_standard = nullptr;
   SetBaudFn set_resistance_enable = nullptr;
+  uint32_t log_channel = 1;
 };
 
 UsbCanFdReceiver::UsbCanFdReceiver() : impl_(new Impl) {}
@@ -135,6 +136,7 @@ bool UsbCanFdReceiver::open(const UsbCanFdConfig& config, std::string* error) {
     close();
     return false;
   }
+  impl_->log_channel = config.channel_index + 1;
 
   if (error != nullptr) {
     error->clear();
@@ -158,10 +160,18 @@ void UsbCanFdReceiver::close() {
 }
 
 bool UsbCanFdReceiver::receive(int wait_time_ms, std::vector<CanFrame>* frames, std::string* error) {
+  return receive(wait_time_ms, frames, nullptr, error);
+}
+
+bool UsbCanFdReceiver::receive(int wait_time_ms, std::vector<CanFrame>* frames,
+                               std::vector<RawCanFdFrame>* raw_frames, std::string* error) {
   if (frames == nullptr) {
     return false;
   }
   frames->clear();
+  if (raw_frames != nullptr) {
+    raw_frames->clear();
+  }
   if (!isOpen()) {
     if (error != nullptr) {
       *error = "USBCAN-FD receiver is not open";
@@ -171,8 +181,26 @@ bool UsbCanFdReceiver::receive(int wait_time_ms, std::vector<CanFrame>* frames, 
   ZCAN_ReceiveFD_Data rx[128]{};
   const UINT count = impl_->receive_fd(impl_->channel, rx, 128, wait_time_ms);
   frames->reserve(count);
+  if (raw_frames != nullptr) {
+    raw_frames->reserve(count);
+  }
   for (UINT i = 0; i < count; ++i) {
     const UINT raw_id = rx[i].frame.can_id;
+    RawCanFdFrame raw_frame;
+    raw_frame.can_id = GET_ID(raw_id);
+    raw_frame.is_extended = IS_EFF(raw_id);
+    raw_frame.is_rtr = IS_RTR(raw_id);
+    raw_frame.is_error = IS_ERR(raw_id);
+    raw_frame.flags = rx[i].frame.flags;
+    raw_frame.len = rx[i].frame.len;
+    raw_frame.timestamp_us = rx[i].timestamp;
+    raw_frame.channel = impl_->log_channel;
+    const uint8_t raw_copy_len = raw_frame.len > raw_frame.data.size() ? raw_frame.data.size()
+                                                                        : raw_frame.len;
+    std::memcpy(raw_frame.data.data(), rx[i].frame.data, raw_copy_len);
+    if (raw_frames != nullptr) {
+      raw_frames->push_back(raw_frame);
+    }
     if (IS_EFF(raw_id) || IS_RTR(raw_id) || IS_ERR(raw_id)) {
       continue;
     }

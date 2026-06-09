@@ -15,7 +15,7 @@ The driver decodes these ARS620 public CAN-FD frames:
 - `0x100..0x140` RDI header and cluster target frames
 - `0x200..0x219` OD header and object target frames
 
-The DBC marks the bus as `CAN FD` and the ARS620 output frames as `StandardCAN_FD`. Extended, RTR, and error frames are dropped by the receiver wrapper. Standard data frames with unsupported IDs or unexpected lengths are ignored.
+The DBC marks the bus as `CAN FD` and the ARS620 output frames as `StandardCAN_FD`. The decoder-facing path ignores extended, RTR, and error frames. When full-frame logging is enabled, those raw frames are still saved before filtering.
 
 ## Hardware And CAN-FD Settings
 
@@ -92,6 +92,30 @@ When raw frames are received, the node prints lines like:
 received 12 raw CAN-FD frames: 0x100=1 0x101=1 ...
 ```
 
+To save every CAN-FD frame returned by the vendor SDK, enable full-frame logging:
+
+```bash
+roslaunch ars620_driver ars620_driver.launch \
+  save_all_canfd_frames:=true \
+  save_all_canfd_path:=/tmp/ars620_canfd_test
+```
+
+The path is a directory. The node creates timestamped files under it:
+
+```text
+ars620_canfd_YYYYmmdd_HHMMSS.asc
+ars620_canfd_YYYYmmdd_HHMMSS.raw.csv
+ars620_canfd_YYYYmmdd_HHMMSS.mf4
+```
+
+ASC and raw CSV are written while the node is running. MF4 is generated only on normal shutdown from the raw CSV by `scripts/raw_canfd_csv_to_mf4.py`. Install the optional converter dependency with:
+
+```bash
+python3 -m pip install asammdf
+```
+
+If `asammdf` is not available, shutdown logs a clear error and keeps the `.asc` and `.raw.csv` files. The MF4 file is an MDF4 container for raw CAN-FD frame fields (`timestamp`, `can_id`, flags, length, and `data_00..data_63`); it is not a DBC-decoded signal log.
+
 ## Launch Parameters
 
 - `library_path`: path to `libcontrolcanfd.so`
@@ -108,6 +132,8 @@ received 12 raw CAN-FD frames: 0x100=1 0x101=1 ...
 - `partial_timeout`: partial cycle timeout in seconds, default `0.1`
 - `receive_wait_ms`: SDK receive wait time in milliseconds, default `20`
 - `debug_raw_frames`: print throttled raw CAN-FD ID counts, default `false`
+- `save_all_canfd_frames`: save all received CAN-FD frames to ASC/raw CSV and convert to MF4 on normal shutdown, default `false`
+- `save_all_canfd_path`: full-frame log output directory, default `~/.ros/ars620_canfd_logs`
 
 ## Topics
 
@@ -158,6 +184,16 @@ rostopic hz /ars620/od_points
 rostopic echo /ars620/config_state
 rostopic echo /ars620/system_status
 ```
+
+Full-frame logging smoke test:
+
+```bash
+roslaunch ars620_driver ars620_driver.launch \
+  save_all_canfd_frames:=true \
+  save_all_canfd_path:=/tmp/ars620_canfd_test
+```
+
+Confirm `.asc` and `.raw.csv` appear while the node is running. After Ctrl-C, confirm that `.mf4` is created or that the log reports the missing `asammdf` dependency. If the process is killed with `SIGKILL` or power is lost, flushed ASC/raw CSV data should remain, but MF4 conversion is not guaranteed.
 
 If `debug_raw_frames:=true` shows no raw frame counts, check radar power, Public CAN wiring, adapter channel, termination, and CAN-FD bitrate settings before debugging the decoder.
 
