@@ -1,0 +1,17 @@
+std_msgs/Header header
+uint32 radar_timestamp_sec
+uint32 radar_timestamp_nsec
+uint32 radar_timestamp_local_us
+uint16 cycle_counter
+uint16 meas_counter
+uint8 num_objects
+float32 latency_ms
+float32 ego_velocity
+float32 ego_yaw_rate
+float32 ego_velocity_std
+float32 ego_acceleration
+float32 ego_curvature
+bool task_valid
+bool extended_cycle
+uint8 msg_group_counter
+Ars620OdTarget[] targets

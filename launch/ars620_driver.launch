@@ -1,0 +1,33 @@
+<launch>
+  <arg name="library_path" default="$(find ars620_driver)/lib/libcontrolcanfd/x86_64/libcontrolcanfd.so" />
+  <arg name="device_type" default="41" />
+  <arg name="device_index" default="0" />
+  <arg name="channel_index" default="0" />
+  <arg name="abit_baud" default="500000" />
+  <arg name="dbit_baud" default="2000000" />
+  <arg name="canfd_standard" default="0" />
+  <arg name="termination_enable" default="false" />
+  <arg name="frame_id" default="ars620" />
+  <arg name="stamp_policy" default="vendor_timestamp" />
+  <arg name="publish_partial" default="false" />
+  <arg name="debug_raw_frames" default="false" />
+  <arg name="partial_timeout" default="0.1" />
+  <arg name="receive_wait_ms" default="20" />
+
+  <node pkg="ars620_driver" type="ars620_driver_node" name="ars620_driver" output="screen">
+    <param name="library_path" value="$(arg library_path)" />
+    <param name="device_type" value="$(arg device_type)" />
+    <param name="device_index" value="$(arg device_index)" />
+    <param name="channel_index" value="$(arg channel_index)" />
+    <param name="abit_baud" value="$(arg abit_baud)" />
+    <param name="dbit_baud" value="$(arg dbit_baud)" />
+    <param name="canfd_standard" value="$(arg canfd_standard)" />
+    <param name="termination_enable" value="$(arg termination_enable)" />
+    <param name="frame_id" value="$(arg frame_id)" />
+    <param name="stamp_policy" value="$(arg stamp_policy)" />
+    <param name="publish_partial" value="$(arg publish_partial)" />
+    <param name="debug_raw_frames" value="$(arg debug_raw_frames)" />
+    <param name="partial_timeout" value="$(arg partial_timeout)" />
+    <param name="receive_wait_ms" value="$(arg receive_wait_ms)" />
+  </node>
+</launch>

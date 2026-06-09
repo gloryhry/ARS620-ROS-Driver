@@ -1,0 +1,12 @@
+uint16 cluster_index
+float32 x
+float32 y
+float32 z
+float32 range
+float32 azimuth
+float32 elevation
+float32 vrad_rel
+float32 rcs
+float32 snr
+uint8 dyn_prop
+uint8 quality

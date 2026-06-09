@@ -1,0 +1,35 @@
+# Catkin and CMake build products
+build/
+devel/
+install/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+cmake_install.cmake
+
+# Test and coverage output
+test_results/
+coverage/
+*.gcda
+*.gcno
+*.gcov
+
+# ROS runtime output
+log/
+*.bag
+*.bag.active
+
+# Local editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+desktop.ini
+
+# Local environment overrides
+.env
+.env.*
+*.local
