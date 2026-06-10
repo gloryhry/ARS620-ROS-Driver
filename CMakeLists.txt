@@ -55,6 +55,7 @@ add_library(${PROJECT_NAME}_core
   src/canfd_frame_logger.cpp
   src/cycle_assembler.cpp
   src/pointcloud.cpp
+  src/processing_timing.cpp
   src/usbcanfd_receiver.cpp
 )
 add_dependencies(${PROJECT_NAME}_core ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
@@ -70,6 +71,7 @@ if(CATKIN_ENABLE_TESTING)
   catkin_add_gtest(test_ars620_driver
     test/test_ars620_decoder.cpp
     test/test_canfd_frame_logger.cpp
+    test/test_processing_timing.cpp
     test/test_vendor_receiver.cpp
   )
   if(TARGET test_ars620_driver)

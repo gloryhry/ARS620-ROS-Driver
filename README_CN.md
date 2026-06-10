@@ -92,6 +92,14 @@ roslaunch ars620_driver ars620_driver.launch debug_raw_frames:=true
 received 12 raw CAN-FD frames: 0x100=1 0x101=1 ...
 ```
 
+如果需要查看驱动处理链路的运行耗时，可以打开 timing 日志：
+
+```bash
+roslaunch ars620_driver ars620_driver.launch debug_timing:=true timing_log_period:=1.0
+```
+
+timing 日志只作为诊断 ROS 日志，不改变任何发布数据。`receive` 阶段包含厂商 SDK 接收调用及其等待/阻塞时间，因此它用于分析循环运行耗时，不代表雷达协议延迟。
+
 如果需要保存厂商 SDK 返回的每一帧 CAN-FD 原始报文，打开全量保存：
 
 ```bash
@@ -131,9 +139,12 @@ python3 -m pip install asammdf
 - `frame_id`: 点云和目标数组的 ROS 坐标系名，默认 `ars620`
 - `stamp_policy`: 时间戳策略，`vendor_timestamp` 或 `ros_time`，默认 `vendor_timestamp`
 - `publish_partial`: 是否在超时后发布不完整 RDI/OD 周期，默认 `false`
+- `rdi_max_targets`: 每个 RDI 周期最多组包并发布的 targets 数，默认 `256`；设置为 `0` 表示不限制
 - `partial_timeout`: 不完整周期超时时间，单位秒，默认 `0.1`
 - `receive_wait_ms`: SDK 接收等待时间，单位毫秒，默认 `20`
 - `debug_raw_frames`: 是否打印原始 CAN-FD ID 计数，默认 `false`
+- `debug_timing`: 是否打印处理链路 timing 日志，默认 `false`
+- `timing_log_period`: timing 日志统计窗口，单位秒，默认 `1.0`
 - `save_all_canfd_frames`: 是否保存收到的全部 CAN-FD 帧，并在正常退出时转换 MF4，默认 `false`
 - `save_all_canfd_path`: 全量帧保存目录，默认 `~/.ros/ars620_canfd_logs`
 
@@ -161,9 +172,11 @@ object_id, classification, dyn_prop, prob_of_exist, maintenance_state
 
 ## 周期组包逻辑
 
-RDI 周期以 `0x100` 开始，最多 512 个 cluster，每个数据帧包含 8 个 cluster。OD 周期以 `0x200` 开始，最多 50 个 object，每个数据帧包含 2 个 object。
+RDI 周期以 `0x100` 开始。DBC 定义的 RDI 数据帧覆盖 `0x101..0x140`，协议上可表示最多 512 个 cluster，每个数据帧包含 8 个 cluster。当前 ARS620 毫米波模式下，驱动默认每周期最多组包并发布 256 个 RDI targets；如果其他模式需要不同上限，可调整 `rdi_max_targets`，设置为 `0` 表示按 header 原始数量组包。`0x101` 对应 clusters `0..7`，`0x102` 对应 `8..15`，依此类推；数据帧允许乱序到达，驱动按 CAN ID 固定槽位组包。最后一个 RDI 数据帧中的尾部 padding targets 会被忽略。OD 周期以 `0x200` 开始，最多 50 个 object，每个数据帧包含 2 个 object。
 
 默认情况下，驱动只在完整周期组包完成后发布 RDI/OD 输出。设置 `publish_partial:=true` 后，驱动会在 `partial_timeout` 秒超时后发布不完整周期。
+
+完整模式下，RDI 周期超时后不会发布不完整点云，驱动会继续保留缓冲等待迟到数据帧补齐。类似 `missing RDI frames: 0x102 0x104` 的 warning 表示当前周期缺少对应的 `0x101..0x140` 数据帧，不等同于雷达 header 自身报错。
 
 `stamp_policy` 默认是 `vendor_timestamp`，即优先使用 USBCAN-FD SDK 给出的接收时间戳。结构化目标数组消息中也会保留从 ARS620 header 报文解码出的雷达全局时间戳和本地时间戳。
 

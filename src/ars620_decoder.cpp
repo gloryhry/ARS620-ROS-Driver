@@ -275,16 +275,29 @@ bool decodeRdiHeader(const CanFrame& f, RdiHeader* out) {
   return true;
 }
 
-bool decodeRdiTargets(const CanFrame& f, std::vector<RdiTarget>* out) {
+bool decodeRdiTargetFrame(const CanFrame& f, RdiTargetFrame* out) {
   if (out == nullptr || f.id < kRdiFirstDataId || f.id > kRdiLastDataId || f.len != 64) {
     return false;
   }
-  out->clear();
-  out->reserve(8);
+  *out = RdiTargetFrame{};
+  out->frame_id = f.id;
+  out->targets.reserve(8);
   const uint16_t base_index = static_cast<uint16_t>((f.id - kRdiFirstDataId) * 8U);
   for (int i = 0; i < 8; ++i) {
-    out->push_back(decodeRdiTargetAt(f, i, static_cast<uint16_t>(base_index + i)));
+    out->targets.push_back(decodeRdiTargetAt(f, i, static_cast<uint16_t>(base_index + i)));
   }
+  return true;
+}
+
+bool decodeRdiTargets(const CanFrame& f, std::vector<RdiTarget>* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  RdiTargetFrame target_frame;
+  if (!decodeRdiTargetFrame(f, &target_frame)) {
+    return false;
+  }
+  *out = target_frame.targets;
   return true;
 }
 

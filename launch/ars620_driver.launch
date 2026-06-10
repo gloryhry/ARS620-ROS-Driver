@@ -10,10 +10,13 @@
   <arg name="frame_id" default="ars620" />
   <arg name="stamp_policy" default="vendor_timestamp" />
   <arg name="publish_partial" default="true" />
+  <arg name="rdi_max_targets" default="256" />
   <arg name="debug_raw_frames" default="false" />
+  <arg name="debug_timing" default="true" />
   <arg name="save_all_canfd_frames" default="false" />
   <arg name="save_all_canfd_path" default="~/ars620/" />
   <arg name="partial_timeout" default="0.1" />
+  <arg name="timing_log_period" default="1.0" />
   <arg name="receive_wait_ms" default="50" />
 
   <node pkg="ars620_driver" type="ars620_driver_node" name="ars620_driver" output="screen">
@@ -28,10 +31,13 @@
     <param name="frame_id" value="$(arg frame_id)" />
     <param name="stamp_policy" value="$(arg stamp_policy)" />
     <param name="publish_partial" value="$(arg publish_partial)" />
+    <param name="rdi_max_targets" value="$(arg rdi_max_targets)" />
     <param name="debug_raw_frames" value="$(arg debug_raw_frames)" />
+    <param name="debug_timing" value="$(arg debug_timing)" />
     <param name="save_all_canfd_frames" value="$(arg save_all_canfd_frames)" />
     <param name="save_all_canfd_path" value="$(arg save_all_canfd_path)" />
     <param name="partial_timeout" value="$(arg partial_timeout)" />
+    <param name="timing_log_period" value="$(arg timing_log_period)" />
     <param name="receive_wait_ms" value="$(arg receive_wait_ms)" />
   </node>
 </launch>

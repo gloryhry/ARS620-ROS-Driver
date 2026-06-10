@@ -218,14 +218,19 @@ TEST(Ars620Decoder, BuildsPointCloud2FieldsAndValues) {
 TEST(Ars620Decoder, AssemblersPublishCompleteAndTimeoutPartialCycles) {
   ars620_driver::RdiAssembler complete_only(false, ros::Duration(0.1));
   ars620_driver::RdiHeader header;
-  header.num_clusters = 2;
+  header.num_clusters = 10;
   ars620_driver::RdiCycle completed;
   EXPECT_FALSE(complete_only.processHeader(header, ros::Time(1.0), &completed));
-  EXPECT_FALSE(complete_only.processTargets({ars620_driver::RdiTarget{}}, &completed));
+  ars620_driver::RdiTargetFrame first_frame;
+  first_frame.frame_id = ars620_driver::kRdiFirstDataId;
+  first_frame.targets.resize(8);
+  EXPECT_FALSE(complete_only.processTargets(first_frame, &completed));
   EXPECT_FALSE(complete_only.pollTimeout(ros::Time(2.0), &completed));
-  std::vector<ars620_driver::RdiTarget> remaining(1);
+  ars620_driver::RdiTargetFrame remaining;
+  remaining.frame_id = ars620_driver::kRdiFirstDataId + 1U;
+  remaining.targets.resize(8);
   EXPECT_TRUE(complete_only.processTargets(remaining, &completed));
-  EXPECT_EQ(completed.targets.size(), 2U);
+  EXPECT_EQ(completed.targets.size(), 10U);
 
   ars620_driver::OdAssembler partial(true, ros::Duration(0.1));
   ars620_driver::OdHeader od_header;
@@ -235,4 +240,194 @@ TEST(Ars620Decoder, AssemblersPublishCompleteAndTimeoutPartialCycles) {
   EXPECT_FALSE(partial.processTargets({ars620_driver::OdTarget{}}, &od_completed));
   EXPECT_TRUE(partial.pollTimeout(ros::Time(1.2), &od_completed));
   EXPECT_EQ(od_completed.targets.size(), 1U);
+}
+
+TEST(Ars620Decoder, DecodesRdiTargetFrameWithFrameId) {
+  CanFrame payload = frame(0x102, 64);
+  ars620_driver::RdiTargetFrame decoded;
+  ASSERT_TRUE(ars620_driver::decodeRdiTargetFrame(payload, &decoded));
+  EXPECT_EQ(decoded.frame_id, 0x102U);
+  ASSERT_EQ(decoded.targets.size(), 8U);
+  EXPECT_EQ(decoded.targets.front().cluster_index, 8);
+  EXPECT_EQ(decoded.targets.back().cluster_index, 15);
+}
+
+TEST(Ars620Decoder, RdiAssemblerAcceptsOutOfOrderFramesInClusterOrder) {
+  ars620_driver::RdiAssembler assembler(false, ros::Duration(0.1));
+  ars620_driver::RdiHeader header;
+  header.num_clusters = 16;
+  ASSERT_FALSE(assembler.processHeader(header, ros::Time(1.0), nullptr));
+
+  ars620_driver::RdiTargetFrame second;
+  second.frame_id = 0x102;
+  second.targets.resize(8);
+  for (size_t i = 0; i < second.targets.size(); ++i) {
+    second.targets[i].cluster_index = static_cast<uint16_t>(8U + i);
+    second.targets[i].range = 100.0 + static_cast<double>(i);
+  }
+  ars620_driver::RdiCycle completed;
+  EXPECT_FALSE(assembler.processTargets(second, &completed));
+
+  ars620_driver::RdiTargetFrame first;
+  first.frame_id = 0x101;
+  first.targets.resize(8);
+  for (size_t i = 0; i < first.targets.size(); ++i) {
+    first.targets[i].cluster_index = static_cast<uint16_t>(i);
+    first.targets[i].range = static_cast<double>(i);
+  }
+  ASSERT_TRUE(assembler.processTargets(first, &completed));
+  ASSERT_EQ(completed.targets.size(), 16U);
+  for (size_t i = 0; i < completed.targets.size(); ++i) {
+    EXPECT_EQ(completed.targets[i].cluster_index, i);
+  }
+  EXPECT_DOUBLE_EQ(completed.targets[0].range, 0.0);
+  EXPECT_DOUBLE_EQ(completed.targets[8].range, 100.0);
+}
+
+TEST(Ars620Decoder, RdiAssemblerTruncatesTailPaddingTargets) {
+  ars620_driver::RdiAssembler assembler(false, ros::Duration(0.1));
+  ars620_driver::RdiHeader header;
+  header.num_clusters = 10;
+  ASSERT_FALSE(assembler.processHeader(header, ros::Time(1.0), nullptr));
+
+  ars620_driver::RdiCycle completed;
+  ars620_driver::RdiTargetFrame first;
+  first.frame_id = 0x101;
+  first.targets.resize(8);
+  EXPECT_FALSE(assembler.processTargets(first, &completed));
+
+  ars620_driver::RdiTargetFrame second;
+  second.frame_id = 0x102;
+  second.targets.resize(8);
+  for (size_t i = 0; i < second.targets.size(); ++i) {
+    second.targets[i].cluster_index = static_cast<uint16_t>(8U + i);
+  }
+  ASSERT_TRUE(assembler.processTargets(second, &completed));
+  ASSERT_EQ(completed.targets.size(), 10U);
+  EXPECT_EQ(completed.targets.back().cluster_index, 9);
+}
+
+TEST(Ars620Decoder, RdiAssemblerCapsDefaultMillimeterWaveTargets) {
+  ars620_driver::RdiAssembler assembler(false, ros::Duration(0.1), 256);
+  ars620_driver::RdiHeader header;
+  header.num_clusters = 512;
+  ASSERT_FALSE(assembler.processHeader(header, ros::Time(1.0), nullptr));
+  EXPECT_EQ(assembler.expectedCount(), 256U);
+
+  ars620_driver::RdiCycle completed;
+  for (uint32_t frame_id = 0x101; frame_id <= 0x120; ++frame_id) {
+    ars620_driver::RdiTargetFrame frame;
+    frame.frame_id = frame_id;
+    frame.targets.resize(8);
+    const bool complete = assembler.processTargets(frame, &completed);
+    if (frame_id < 0x120) {
+      EXPECT_FALSE(complete);
+    } else {
+      EXPECT_TRUE(complete);
+    }
+  }
+
+  ASSERT_EQ(completed.targets.size(), 256U);
+  EXPECT_EQ(completed.header.num_clusters, 512);
+}
+
+TEST(Ars620Decoder, RdiAssemblerAllowsUnboundedRdiTargets) {
+  ars620_driver::RdiAssembler assembler(false, ros::Duration(0.1), 0);
+  ars620_driver::RdiHeader header;
+  header.num_clusters = 512;
+  ASSERT_FALSE(assembler.processHeader(header, ros::Time(1.0), nullptr));
+
+  ars620_driver::RdiCycle completed;
+  for (uint32_t frame_id = 0x101; frame_id <= 0x120; ++frame_id) {
+    ars620_driver::RdiTargetFrame frame;
+    frame.frame_id = frame_id;
+    frame.targets.resize(8);
+    EXPECT_FALSE(assembler.processTargets(frame, &completed));
+  }
+
+  EXPECT_TRUE(assembler.hasActiveCycle());
+  EXPECT_EQ(assembler.expectedCount(), 512U);
+  EXPECT_EQ(assembler.receivedCount(), 256U);
+}
+
+TEST(Ars620Decoder, RdiAssemblerReportsMissingFrameIds) {
+  ars620_driver::RdiAssembler assembler(false, ros::Duration(0.1));
+  ars620_driver::RdiHeader header;
+  header.num_clusters = 24;
+  ASSERT_FALSE(assembler.processHeader(header, ros::Time(1.0), nullptr));
+
+  ars620_driver::RdiTargetFrame first;
+  first.frame_id = 0x101;
+  first.targets.resize(8);
+  ars620_driver::RdiTargetFrame third;
+  third.frame_id = 0x103;
+  third.targets.resize(8);
+  ars620_driver::RdiCycle completed;
+  EXPECT_FALSE(assembler.processTargets(first, &completed));
+  EXPECT_FALSE(assembler.processTargets(third, &completed));
+
+  const auto missing = assembler.missingFrameIds();
+  ASSERT_EQ(missing.size(), 1U);
+  EXPECT_EQ(missing[0], 0x102U);
+  EXPECT_TRUE(assembler.hasActiveCycle());
+  EXPECT_EQ(assembler.expectedCount(), 24U);
+  EXPECT_EQ(assembler.receivedCount(), 16U);
+}
+
+TEST(Ars620Decoder, RdiAssemblerWaitsAfterTimeoutAndCompletesLater) {
+  ars620_driver::RdiAssembler assembler(false, ros::Duration(0.1));
+  ars620_driver::RdiHeader header;
+  header.num_clusters = 16;
+  ASSERT_FALSE(assembler.processHeader(header, ros::Time(1.0), nullptr));
+
+  ars620_driver::RdiTargetFrame second;
+  second.frame_id = 0x102;
+  second.targets.resize(8);
+  ars620_driver::RdiCycle completed;
+  EXPECT_FALSE(assembler.processTargets(second, &completed));
+  EXPECT_FALSE(assembler.pollTimeout(ros::Time(1.2), &completed));
+
+  ars620_driver::RdiTargetFrame first;
+  first.frame_id = 0x101;
+  first.targets.resize(8);
+  EXPECT_TRUE(assembler.processTargets(first, &completed));
+  EXPECT_EQ(completed.targets.size(), 16U);
+}
+
+TEST(Ars620Decoder, RdiAssemblerDropsIncompleteCycleOnNewHeader) {
+  ars620_driver::RdiAssembler assembler(false, ros::Duration(0.1));
+  ars620_driver::RdiHeader old_header;
+  old_header.cycle_counter = 7;
+  old_header.num_clusters = 16;
+  ASSERT_FALSE(assembler.processHeader(old_header, ros::Time(1.0), nullptr));
+  ars620_driver::RdiTargetFrame second;
+  second.frame_id = 0x102;
+  second.targets.resize(8);
+  ars620_driver::RdiCycle completed;
+  EXPECT_FALSE(assembler.processTargets(second, &completed));
+  ASSERT_EQ(assembler.missingFrameIds().size(), 1U);
+  EXPECT_EQ(assembler.missingFrameIds()[0], 0x101U);
+
+  ars620_driver::RdiHeader new_header;
+  new_header.cycle_counter = 8;
+  new_header.num_clusters = 8;
+  EXPECT_FALSE(assembler.processHeader(new_header, ros::Time(1.1), &completed));
+  EXPECT_EQ(assembler.cycleCounter(), 8);
+  EXPECT_EQ(assembler.receivedCount(), 0U);
+  EXPECT_EQ(assembler.expectedCount(), 8U);
+}
+
+TEST(Ars620Decoder, RdiAssemblerPublishesPartialOnlyWhenEnabled) {
+  ars620_driver::RdiAssembler assembler(true, ros::Duration(0.1));
+  ars620_driver::RdiHeader header;
+  header.num_clusters = 16;
+  ASSERT_FALSE(assembler.processHeader(header, ros::Time(1.0), nullptr));
+  ars620_driver::RdiTargetFrame second;
+  second.frame_id = 0x102;
+  second.targets.resize(8);
+  ars620_driver::RdiCycle completed;
+  EXPECT_FALSE(assembler.processTargets(second, &completed));
+  ASSERT_TRUE(assembler.pollTimeout(ros::Time(1.2), &completed));
+  EXPECT_EQ(completed.targets.size(), 8U);
+  EXPECT_FALSE(assembler.hasActiveCycle());
 }

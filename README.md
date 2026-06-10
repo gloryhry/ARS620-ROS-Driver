@@ -92,6 +92,14 @@ When raw frames are received, the node prints lines like:
 received 12 raw CAN-FD frames: 0x100=1 0x101=1 ...
 ```
 
+To inspect runtime processing cost without changing published data, enable timing logs:
+
+```bash
+roslaunch ars620_driver ars620_driver.launch debug_timing:=true timing_log_period:=1.0
+```
+
+Timing logs are diagnostic ROS logs only. The `receive` stage includes the vendor SDK receive call and its wait/block time, so it is useful for loop-runtime analysis but does not measure radar protocol latency.
+
 To save every CAN-FD frame returned by the vendor SDK, enable full-frame logging:
 
 ```bash
@@ -129,9 +137,12 @@ If `asammdf` is not available, shutdown logs a clear error and keeps the `.asc` 
 - `frame_id`: ROS frame ID for point clouds and target arrays, default `ars620`
 - `stamp_policy`: `vendor_timestamp` or `ros_time`, default `vendor_timestamp`
 - `publish_partial`: publish incomplete RDI/OD cycles after timeout, default `false`
+- `rdi_max_targets`: maximum RDI targets assembled and published per cycle, default `256`; set `0` to disable the limit
 - `partial_timeout`: partial cycle timeout in seconds, default `0.1`
 - `receive_wait_ms`: SDK receive wait time in milliseconds, default `20`
 - `debug_raw_frames`: print throttled raw CAN-FD ID counts, default `false`
+- `debug_timing`: print throttled processing timing logs, default `false`
+- `timing_log_period`: timing log window in seconds, default `1.0`
 - `save_all_canfd_frames`: save all received CAN-FD frames to ASC/raw CSV and convert to MF4 on normal shutdown, default `false`
 - `save_all_canfd_path`: full-frame log output directory, default `~/.ros/ars620_canfd_logs`
 
@@ -159,9 +170,11 @@ object_id, classification, dyn_prop, prob_of_exist, maintenance_state
 
 ## Cycle Handling
 
-RDI cycles start with `0x100` and can contain up to 512 clusters, with 8 clusters per data frame. OD cycles start with `0x200` and can contain up to 50 objects, with 2 objects per data frame.
+RDI cycles start with `0x100`. The DBC defines RDI data frames through `0x101..0x140`, so the protocol can represent up to 512 clusters with 8 clusters per data frame. In the current ARS620 millimeter-wave mode, the driver defaults to assembling and publishing at most 256 RDI targets per cycle; adjust `rdi_max_targets` if a different mode needs a different limit, or set it to `0` to assemble according to the raw header count. `0x101` maps to clusters `0..7`, `0x102` maps to `8..15`, and so on; data frames may arrive out of order and are assembled by CAN ID. Tail padding targets in the final RDI data frame are ignored. OD cycles start with `0x200` and can contain up to 50 objects, with 2 objects per data frame.
 
 By default, RDI and OD outputs are published only after a complete cycle has been assembled. Set `publish_partial:=true` to publish partial cycles after `partial_timeout` seconds.
+
+In complete-only mode, an incomplete RDI cycle is kept after timeout so late data frames can still complete it. Warnings such as `missing RDI frames: 0x102 0x104` mean those `0x101..0x140` data frames did not arrive for the current cycle; they do not mean the radar header itself reported an error.
 
 `stamp_policy` defaults to `vendor_timestamp`, using the USBCAN-FD receive timestamp when available. The structured target array messages also preserve radar global and local timestamps decoded from the ARS620 header frames.
 

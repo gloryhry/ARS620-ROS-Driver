@@ -2,6 +2,7 @@
 #include <ars620_driver/canfd_frame_logger.h>
 #include <ars620_driver/cycle_assembler.h>
 #include <ars620_driver/pointcloud.h>
+#include <ars620_driver/processing_timing.h>
 #include <ars620_driver/usbcanfd_receiver.h>
 
 #include <ars620_driver/Ars620ConfigState.h>
@@ -13,15 +14,61 @@
 
 #include <map>
 #include <sstream>
+#include <vector>
 
 namespace ars620_driver {
 namespace {
+
+enum class DecodedFrameType {
+  kNone,
+  kConfigState,
+  kSystemStatus,
+  kRdiHeader,
+  kRdiTargets,
+  kOdHeader,
+  kOdTargets,
+};
+
+const std::vector<std::string>& timingStageOrder() {
+  static const std::vector<std::string> stages = {"receive", "raw_log", "raw_summary", "decode",
+                                                  "assemble", "message", "pointcloud", "publish",
+                                                  "loop"};
+  return stages;
+}
+
+void maybeLogTimingStats(ProcessingTimingStats* timing_stats, const bool debug_timing,
+                         const double timing_log_period, ros::WallTime* next_log_time) {
+  if (!debug_timing || timing_stats->empty()) {
+    return;
+  }
+  const ros::WallTime now = ros::WallTime::now();
+  if (now < *next_log_time) {
+    return;
+  }
+  const std::string formatted = timing_stats->format(timingStageOrder());
+  if (!formatted.empty()) {
+    ROS_INFO_STREAM_THROTTLE(timing_log_period, "ARS620 timing: " << formatted);
+  }
+  timing_stats->reset();
+  *next_log_time = now + ros::WallDuration(timing_log_period);
+}
 
 ros::Time stampForFrame(const CanFrame& frame, const std::string& policy) {
   if (policy == "vendor_timestamp" && frame.timestamp_us > 0) {
     return ros::Time().fromNSec(frame.timestamp_us * 1000ULL);
   }
   return ros::Time::now();
+}
+
+std::string formatFrameIds(const std::vector<uint32_t>& frame_ids) {
+  std::ostringstream oss;
+  for (const auto frame_id : frame_ids) {
+    if (oss.tellp() > 0) {
+      oss << ' ';
+    }
+    oss << "0x" << std::hex << frame_id << std::dec;
+  }
+  return oss.str();
 }
 
 Ars620ConfigState toMsg(const ConfigState& in, const std_msgs::Header& header) {
@@ -139,7 +186,12 @@ Ars620RdiTargetArray toMsg(const RdiCycle& cycle, const std_msgs::Header& header
   msg.radar_timestamp_local_us = cycle.header.local_timestamp_us;
   msg.cycle_counter = cycle.header.cycle_counter;
   msg.meas_counter = cycle.header.meas_counter;
-  msg.num_clusters = cycle.header.num_clusters;
+  msg.num_clusters = static_cast<uint16_t>(cycle.targets.size());
+  if (cycle.header.num_clusters > cycle.targets.size()) {
+    ROS_WARN_STREAM_THROTTLE(1.0, "RDI target count limited from header value "
+                                      << cycle.header.num_clusters << " to published count "
+                                      << cycle.targets.size());
+  }
   msg.max_detection_range = cycle.header.max_detection_range_m;
   msg.ego_velocity = cycle.header.ego_velocity_mps;
   msg.ego_yaw_rate = cycle.header.ego_yaw_rate_radps;
@@ -262,18 +314,32 @@ int main(int argc, char** argv) {
   std::string stamp_policy = "vendor_timestamp";
   bool publish_partial = false;
   bool debug_raw_frames = false;
+  bool debug_timing = false;
   bool save_all_canfd_frames = false;
   std::string save_all_canfd_path = "~/.ros/ars620_canfd_logs";
   double partial_timeout = 0.1;
+  double timing_log_period = 1.0;
   int receive_wait_ms = 20;
+  int rdi_max_targets = 256;
   pnh.param("frame_id", frame_id, frame_id);
   pnh.param("stamp_policy", stamp_policy, stamp_policy);
   pnh.param("publish_partial", publish_partial, publish_partial);
   pnh.param("debug_raw_frames", debug_raw_frames, debug_raw_frames);
+  pnh.param("debug_timing", debug_timing, debug_timing);
   pnh.param("save_all_canfd_frames", save_all_canfd_frames, save_all_canfd_frames);
   pnh.param("save_all_canfd_path", save_all_canfd_path, save_all_canfd_path);
   pnh.param("partial_timeout", partial_timeout, partial_timeout);
+  pnh.param("timing_log_period", timing_log_period, timing_log_period);
   pnh.param("receive_wait_ms", receive_wait_ms, receive_wait_ms);
+  pnh.param("rdi_max_targets", rdi_max_targets, rdi_max_targets);
+  if (timing_log_period <= 0.0) {
+    ROS_WARN_STREAM("timing_log_period must be positive; using 1.0 seconds");
+    timing_log_period = 1.0;
+  }
+  if (rdi_max_targets < 0) {
+    ROS_WARN_STREAM("rdi_max_targets must be >= 0; using 256");
+    rdi_max_targets = 256;
+  }
 
   ros::Publisher rdi_points_pub =
       nh.advertise<sensor_msgs::PointCloud2>("/ars620/rdi_points", 10);
@@ -304,95 +370,205 @@ int main(int argc, char** argv) {
     }
   }
 
-  ars620_driver::RdiAssembler rdi_assembler(publish_partial, ros::Duration(partial_timeout));
+  ars620_driver::RdiAssembler rdi_assembler(
+      publish_partial, ros::Duration(partial_timeout), static_cast<size_t>(rdi_max_targets));
   ars620_driver::OdAssembler od_assembler(publish_partial, ros::Duration(partial_timeout));
   std::vector<ars620_driver::CanFrame> frames;
   std::vector<ars620_driver::RawCanFdFrame> raw_frames;
+  ars620_driver::ProcessingTimingStats timing_stats;
+  ros::WallTime next_timing_log = ros::WallTime::now() + ros::WallDuration(timing_log_period);
   ros::Rate idle_rate(200.0);
   while (ros::ok()) {
-    if (!receiver.receive(receive_wait_ms, &frames, save_all_canfd_frames ? &raw_frames : nullptr,
-                          &error)) {
-      ROS_ERROR_STREAM_THROTTLE(1.0, "USBCAN-FD receive failed: " << error);
+    {
+      ars620_driver::ScopedProcessingTimer loop_timer(&timing_stats, "loop", debug_timing);
+      bool received = false;
+      {
+        ars620_driver::ScopedProcessingTimer timer(&timing_stats, "receive", debug_timing);
+        received = receiver.receive(receive_wait_ms, &frames,
+                                    save_all_canfd_frames ? &raw_frames : nullptr, &error);
+      }
+      if (!received) {
+        ROS_ERROR_STREAM_THROTTLE(1.0, "USBCAN-FD receive failed: " << error);
+      } else {
+        if (canfd_logger.isOpen()) {
+          ars620_driver::ScopedProcessingTimer timer(&timing_stats, "raw_log", debug_timing);
+          for (const auto& raw_frame : raw_frames) {
+            if (!canfd_logger.write(raw_frame, &error)) {
+              ROS_ERROR_STREAM("CAN-FD full-frame logging disabled: " << error);
+              break;
+            }
+          }
+        }
+        if (debug_raw_frames && !frames.empty()) {
+          ars620_driver::ScopedProcessingTimer timer(&timing_stats, "raw_summary", debug_timing);
+          std::map<uint32_t, size_t> id_counts;
+          for (const auto& frame : frames) {
+            ++id_counts[frame.id];
+          }
+          std::ostringstream oss;
+          oss << "received " << frames.size() << " raw CAN-FD frames:";
+          for (const auto& entry : id_counts) {
+            oss << " 0x" << std::hex << entry.first << std::dec << "=" << entry.second;
+          }
+          ROS_INFO_STREAM_THROTTLE(1.0, oss.str());
+        }
+        for (const auto& frame : frames) {
+          std_msgs::Header header;
+          header.stamp = ars620_driver::stampForFrame(frame, stamp_policy);
+          header.frame_id = frame_id;
+
+          ars620_driver::ConfigState config_state;
+          ars620_driver::SystemStatus status;
+          ars620_driver::RdiHeader rdi_header;
+          ars620_driver::OdHeader od_header;
+          ars620_driver::RdiTargetFrame rdi_target_frame;
+          std::vector<ars620_driver::OdTarget> od_targets;
+          ars620_driver::RdiCycle rdi_cycle;
+          ars620_driver::OdCycle od_cycle;
+          ars620_driver::DecodedFrameType decoded_type = ars620_driver::DecodedFrameType::kNone;
+
+          {
+            ars620_driver::ScopedProcessingTimer timer(&timing_stats, "decode", debug_timing);
+            if (ars620_driver::decodeConfigState(frame, &config_state)) {
+              decoded_type = ars620_driver::DecodedFrameType::kConfigState;
+            } else if (ars620_driver::decodeSystemStatus(frame, &status)) {
+              decoded_type = ars620_driver::DecodedFrameType::kSystemStatus;
+            } else if (ars620_driver::decodeRdiHeader(frame, &rdi_header)) {
+              decoded_type = ars620_driver::DecodedFrameType::kRdiHeader;
+            } else if (ars620_driver::decodeRdiTargetFrame(frame, &rdi_target_frame)) {
+              decoded_type = ars620_driver::DecodedFrameType::kRdiTargets;
+            } else if (ars620_driver::decodeOdHeader(frame, &od_header)) {
+              decoded_type = ars620_driver::DecodedFrameType::kOdHeader;
+            } else if (ars620_driver::decodeOdTargets(frame, &od_targets)) {
+              decoded_type = ars620_driver::DecodedFrameType::kOdTargets;
+            }
+          }
+
+          bool publish_config = false;
+          bool publish_status = false;
+          bool publish_rdi = false;
+          bool publish_od = false;
+          {
+            ars620_driver::ScopedProcessingTimer timer(&timing_stats, "assemble", debug_timing);
+            if (decoded_type == ars620_driver::DecodedFrameType::kConfigState) {
+              publish_config = true;
+            } else if (decoded_type == ars620_driver::DecodedFrameType::kSystemStatus) {
+              publish_status = true;
+            } else if (decoded_type == ars620_driver::DecodedFrameType::kRdiHeader) {
+              if (rdi_assembler.hasActiveCycle() &&
+                  rdi_assembler.receivedCount() < rdi_assembler.expectedCount()) {
+                ROS_WARN_STREAM("dropping incomplete RDI cycle " << rdi_assembler.cycleCounter()
+                                << " before new header: expected " << rdi_assembler.expectedCount()
+                                << " targets, received " << rdi_assembler.receivedCount()
+                                << ", missing RDI frames: "
+                                << ars620_driver::formatFrameIds(rdi_assembler.missingFrameIds()));
+              }
+              publish_rdi = rdi_assembler.processHeader(rdi_header, ros::Time::now(), &rdi_cycle);
+            } else if (decoded_type == ars620_driver::DecodedFrameType::kRdiTargets) {
+              publish_rdi = rdi_assembler.processTargets(rdi_target_frame, &rdi_cycle);
+            } else if (decoded_type == ars620_driver::DecodedFrameType::kOdHeader) {
+              publish_od = od_assembler.processHeader(od_header, header.stamp, &od_cycle);
+            } else if (decoded_type == ars620_driver::DecodedFrameType::kOdTargets) {
+              publish_od = od_assembler.processTargets(od_targets, &od_cycle);
+            }
+          }
+
+          if (publish_config) {
+            const auto msg = [&]() {
+              ars620_driver::ScopedProcessingTimer timer(&timing_stats, "message", debug_timing);
+              return ars620_driver::toMsg(config_state, header);
+            }();
+            ars620_driver::ScopedProcessingTimer timer(&timing_stats, "publish", debug_timing);
+            config_pub.publish(msg);
+          } else if (publish_status) {
+            const auto msg = [&]() {
+              ars620_driver::ScopedProcessingTimer timer(&timing_stats, "message", debug_timing);
+              return ars620_driver::toMsg(status, header);
+            }();
+            ars620_driver::ScopedProcessingTimer timer(&timing_stats, "publish", debug_timing);
+            status_pub.publish(msg);
+          } else if (publish_rdi) {
+            const auto target_msg = [&]() {
+              ars620_driver::ScopedProcessingTimer timer(&timing_stats, "message", debug_timing);
+              return ars620_driver::toMsg(rdi_cycle, header);
+            }();
+            const auto pointcloud = [&]() {
+              ars620_driver::ScopedProcessingTimer timer(&timing_stats, "pointcloud", debug_timing);
+              return ars620_driver::makeRdiPointCloud(header, rdi_cycle.targets);
+            }();
+            ars620_driver::ScopedProcessingTimer timer(&timing_stats, "publish", debug_timing);
+            rdi_targets_pub.publish(target_msg);
+            rdi_points_pub.publish(pointcloud);
+          } else if (publish_od) {
+            const auto target_msg = [&]() {
+              ars620_driver::ScopedProcessingTimer timer(&timing_stats, "message", debug_timing);
+              return ars620_driver::toMsg(od_cycle, header);
+            }();
+            const auto pointcloud = [&]() {
+              ars620_driver::ScopedProcessingTimer timer(&timing_stats, "pointcloud", debug_timing);
+              return ars620_driver::makeOdPointCloud(header, od_cycle.targets);
+            }();
+            ars620_driver::ScopedProcessingTimer timer(&timing_stats, "publish", debug_timing);
+            od_targets_pub.publish(target_msg);
+            od_points_pub.publish(pointcloud);
+          }
+        }
+
+        ars620_driver::RdiCycle rdi_cycle;
+        ars620_driver::OdCycle od_cycle;
+        std_msgs::Header timeout_header;
+        timeout_header.stamp = ros::Time::now();
+        timeout_header.frame_id = frame_id;
+        bool publish_rdi_timeout = false;
+        bool publish_od_timeout = false;
+        {
+          ars620_driver::ScopedProcessingTimer timer(&timing_stats, "assemble", debug_timing);
+          if (rdi_assembler.pollTimeout(timeout_header.stamp, &rdi_cycle)) {
+            publish_rdi_timeout = true;
+          } else if (rdi_assembler.hasTimedOut(timeout_header.stamp) &&
+                     rdi_assembler.receivedCount() < rdi_assembler.expectedCount()) {
+            ROS_WARN_STREAM_THROTTLE(1.0, "waiting for complete RDI cycle "
+                                              << rdi_assembler.cycleCounter() << ": expected "
+                                              << rdi_assembler.expectedCount()
+                                              << " targets, received " << rdi_assembler.receivedCount()
+                                              << ", missing RDI frames: "
+                                              << ars620_driver::formatFrameIds(
+                                                     rdi_assembler.missingFrameIds()));
+          }
+          publish_od_timeout = od_assembler.pollTimeout(timeout_header.stamp, &od_cycle);
+        }
+        if (publish_rdi_timeout) {
+          const auto target_msg = [&]() {
+            ars620_driver::ScopedProcessingTimer timer(&timing_stats, "message", debug_timing);
+            return ars620_driver::toMsg(rdi_cycle, timeout_header);
+          }();
+          const auto pointcloud = [&]() {
+            ars620_driver::ScopedProcessingTimer timer(&timing_stats, "pointcloud", debug_timing);
+            return ars620_driver::makeRdiPointCloud(timeout_header, rdi_cycle.targets);
+          }();
+          ars620_driver::ScopedProcessingTimer timer(&timing_stats, "publish", debug_timing);
+          rdi_targets_pub.publish(target_msg);
+          rdi_points_pub.publish(pointcloud);
+        }
+        if (publish_od_timeout) {
+          const auto target_msg = [&]() {
+            ars620_driver::ScopedProcessingTimer timer(&timing_stats, "message", debug_timing);
+            return ars620_driver::toMsg(od_cycle, timeout_header);
+          }();
+          const auto pointcloud = [&]() {
+            ars620_driver::ScopedProcessingTimer timer(&timing_stats, "pointcloud", debug_timing);
+            return ars620_driver::makeOdPointCloud(timeout_header, od_cycle.targets);
+          }();
+          ars620_driver::ScopedProcessingTimer timer(&timing_stats, "publish", debug_timing);
+          od_targets_pub.publish(target_msg);
+          od_points_pub.publish(pointcloud);
+        }
+      }
+
       ros::spinOnce();
-      idle_rate.sleep();
-      continue;
     }
-    if (canfd_logger.isOpen()) {
-      for (const auto& raw_frame : raw_frames) {
-        if (!canfd_logger.write(raw_frame, &error)) {
-          ROS_ERROR_STREAM("CAN-FD full-frame logging disabled: " << error);
-          break;
-        }
-      }
-    }
-    if (debug_raw_frames && !frames.empty()) {
-      std::map<uint32_t, size_t> id_counts;
-      for (const auto& frame : frames) {
-        ++id_counts[frame.id];
-      }
-      std::ostringstream oss;
-      oss << "received " << frames.size() << " raw CAN-FD frames:";
-      for (const auto& entry : id_counts) {
-        oss << " 0x" << std::hex << entry.first << std::dec << "=" << entry.second;
-      }
-      ROS_INFO_STREAM_THROTTLE(1.0, oss.str());
-    }
-    for (const auto& frame : frames) {
-      std_msgs::Header header;
-      header.stamp = ars620_driver::stampForFrame(frame, stamp_policy);
-      header.frame_id = frame_id;
-
-      ars620_driver::ConfigState config_state;
-      ars620_driver::SystemStatus status;
-      ars620_driver::RdiHeader rdi_header;
-      ars620_driver::OdHeader od_header;
-      std::vector<ars620_driver::RdiTarget> rdi_targets;
-      std::vector<ars620_driver::OdTarget> od_targets;
-      ars620_driver::RdiCycle rdi_cycle;
-      ars620_driver::OdCycle od_cycle;
-
-      if (ars620_driver::decodeConfigState(frame, &config_state)) {
-        config_pub.publish(ars620_driver::toMsg(config_state, header));
-      } else if (ars620_driver::decodeSystemStatus(frame, &status)) {
-        status_pub.publish(ars620_driver::toMsg(status, header));
-      } else if (ars620_driver::decodeRdiHeader(frame, &rdi_header)) {
-        if (rdi_assembler.processHeader(rdi_header, header.stamp, &rdi_cycle)) {
-          rdi_targets_pub.publish(ars620_driver::toMsg(rdi_cycle, header));
-          rdi_points_pub.publish(ars620_driver::makeRdiPointCloud(header, rdi_cycle.targets));
-        }
-      } else if (ars620_driver::decodeRdiTargets(frame, &rdi_targets)) {
-        if (rdi_assembler.processTargets(rdi_targets, &rdi_cycle)) {
-          rdi_targets_pub.publish(ars620_driver::toMsg(rdi_cycle, header));
-          rdi_points_pub.publish(ars620_driver::makeRdiPointCloud(header, rdi_cycle.targets));
-        }
-      } else if (ars620_driver::decodeOdHeader(frame, &od_header)) {
-        if (od_assembler.processHeader(od_header, header.stamp, &od_cycle)) {
-          od_targets_pub.publish(ars620_driver::toMsg(od_cycle, header));
-          od_points_pub.publish(ars620_driver::makeOdPointCloud(header, od_cycle.targets));
-        }
-      } else if (ars620_driver::decodeOdTargets(frame, &od_targets)) {
-        if (od_assembler.processTargets(od_targets, &od_cycle)) {
-          od_targets_pub.publish(ars620_driver::toMsg(od_cycle, header));
-          od_points_pub.publish(ars620_driver::makeOdPointCloud(header, od_cycle.targets));
-        }
-      }
-    }
-
-    ars620_driver::RdiCycle rdi_cycle;
-    ars620_driver::OdCycle od_cycle;
-    std_msgs::Header timeout_header;
-    timeout_header.stamp = ros::Time::now();
-    timeout_header.frame_id = frame_id;
-    if (rdi_assembler.pollTimeout(timeout_header.stamp, &rdi_cycle)) {
-      rdi_targets_pub.publish(ars620_driver::toMsg(rdi_cycle, timeout_header));
-      rdi_points_pub.publish(ars620_driver::makeRdiPointCloud(timeout_header, rdi_cycle.targets));
-    }
-    if (od_assembler.pollTimeout(timeout_header.stamp, &od_cycle)) {
-      od_targets_pub.publish(ars620_driver::toMsg(od_cycle, timeout_header));
-      od_points_pub.publish(ars620_driver::makeOdPointCloud(timeout_header, od_cycle.targets));
-    }
-
-    ros::spinOnce();
+    ars620_driver::maybeLogTimingStats(&timing_stats, debug_timing, timing_log_period,
+                                       &next_timing_log);
     idle_rate.sleep();
   }
   canfd_logger.close(true);

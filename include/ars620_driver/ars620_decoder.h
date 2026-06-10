@@ -171,6 +171,11 @@ struct RdiTarget {
   double z = 0.0;
 };
 
+struct RdiTargetFrame {
+  uint32_t frame_id = 0;
+  std::vector<RdiTarget> targets;
+};
+
 struct RdiCycle {
   RdiHeader header;
   std::vector<RdiTarget> targets;
@@ -236,6 +241,7 @@ struct OdCycle {
 bool decodeConfigState(const CanFrame& frame, ConfigState* out);
 bool decodeSystemStatus(const CanFrame& frame, SystemStatus* out);
 bool decodeRdiHeader(const CanFrame& frame, RdiHeader* out);
+bool decodeRdiTargetFrame(const CanFrame& frame, RdiTargetFrame* out);
 bool decodeRdiTargets(const CanFrame& frame, std::vector<RdiTarget>* out);
 bool decodeOdHeader(const CanFrame& frame, OdHeader* out);
 bool decodeOdTargets(const CanFrame& frame, std::vector<OdTarget>* out);
